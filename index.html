@@ -1262,6 +1262,20 @@ canvas.layer {
   letter-spacing: 1px;
 }
 
+
+/* ===== HIDDEN YOUTUBE PLAYER (audio only) ===== */
+#ytPlayerHolder {
+  position: fixed;
+  left: -9999px;
+  top: -9999px;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: -1;
+}
+
 </style>
 </head>
 <body>
@@ -1319,6 +1333,7 @@ canvas.layer {
 <canvas id="heartsCanvas" class="layer"></canvas>
 
 <!-- ===== MUSIC TOGGLE ===== -->
+<div id="ytPlayerHolder" aria-hidden="true"></div>
 <button class="music-toggle" id="musicToggle" aria-label="Toggle music">
   <div class="bars"><span></span><span></span><span></span><span></span></div>
 </button>
@@ -1979,6 +1994,14 @@ Happy Diwali, My Queen! ❤️🪔
     let nextNoteTime = 0;
     let melodyIdx = 0;
 
+    // ---- YouTube song integration ----
+    let ytPlayer = null;
+    let ytReady = false;
+    let ytLoading = false;
+    let ytDucked = false;
+    const YT_VIDEO_ID = 'Ddm7VUgw5Vw';
+    const BASE_VOL = 0.5;
+
     // ---- Raga Yaman (evening romance raga) note frequencies (Hz) ----
     // Sa=C. Uses tivra Ma (F#). Perfect for a Diwali-night romantic mood.
     const N = {
@@ -2234,12 +2257,87 @@ Happy Diwali, My Queen! ❤️🪔
       chimeTimer = setTimeout(scheduleChime, 3000);
     }
 
+    // ---- YouTube IFrame API ----
+    function initYouTube() {
+      if (window.YT && window.YT.Player) {
+        createYTPlayer();
+      } else {
+        loadYouTubeAPI();
+      }
+    }
+    function loadYouTubeAPI() {
+      if (ytLoading) return;
+      ytLoading = true;
+      window.onYouTubeIframeAPIReady = window.onYouTubeIframeAPIReady || function () {
+        createYTPlayer();
+      };
+      const tag = document.createElement('script');
+      tag.src = 'https://www.youtube.com/iframe_api';
+      document.head.appendChild(tag);
+    }
+    function createYTPlayer() {
+      if (ytPlayer) return;
+      if (!(window.YT && window.YT.Player)) return;
+      if (!document.getElementById('ytPlayerHolder')) return;
+      try {
+        ytPlayer = new YT.Player('ytPlayerHolder', {
+          videoId: YT_VIDEO_ID,
+          width: '200',
+          height: '120',
+          playerVars: {
+            autoplay: 1,
+            controls: 0,
+            loop: 1,
+            playlist: YT_VIDEO_ID,
+            modestbranding: 1,
+            rel: 0,
+            iv_load_policy: 3,
+            playsinline: 1,
+            fs: 0,
+            disablekb: 1
+          },
+          events: {
+            onReady: function (e) {
+              ytReady = true;
+              try { e.target.setVolume(70); } catch (err) {}
+              try { e.target.playVideo(); } catch (err) {}
+              if (muted) { try { e.target.mute(); } catch (err) {} }
+            },
+            onStateChange: function (e) {
+              // 1 = playing. Only duck the generated music once the song is
+              // actually playing AND audible (not auto-muted by the browser).
+              if (e.data === 1 && !ytDucked) {
+                let audible = true;
+                try { audible = !ytPlayer.isMuted(); } catch (err) {}
+                if (audible && ctx && master) {
+                  ytDucked = true;
+                  master.gain.cancelScheduledValues(ctx.currentTime);
+                  master.gain.linearRampToValueAtTime(0, ctx.currentTime + 3.5);
+                }
+              }
+              // 0 = ended -> loop the song
+              if (e.data === 0) {
+                try { e.target.seekTo(0); e.target.playVideo(); } catch (err) {}
+              }
+            },
+            onError: function () {
+              // If the video can't play, keep the generated music unducked.
+              ytDucked = false;
+            }
+          }
+        });
+      } catch (err) {
+        ytDucked = false;
+      }
+    }
+
     function start() {
       if (started) return;
       started = true;
       init();
       if (ctx && ctx.state === 'suspended') ctx.resume();
       musicToggle.classList.add('visible');
+      initYouTube();
     }
 
     function toggle() {
@@ -2251,9 +2349,26 @@ Happy Diwali, My Queen! ❤️🪔
         muted = !muted;
         if (ctx.state === 'suspended') ctx.resume();
       }
-      if (master) {
+      // Generated music: silent when muted OR once the YouTube song has taken over.
+      if (master && ctx) {
         master.gain.cancelScheduledValues(ctx.currentTime);
-        master.gain.linearRampToValueAtTime(muted ? 0 : 0.5, ctx.currentTime + 0.35);
+        const target = muted ? 0 : (ytDucked ? 0 : BASE_VOL);
+        master.gain.linearRampToValueAtTime(target, ctx.currentTime + 0.4);
+      }
+      // YouTube song control
+      if (ytPlayer && ytReady) {
+        try {
+          if (muted) {
+            ytPlayer.mute();
+          } else {
+            ytPlayer.unMute();
+            ytPlayer.setVolume(75);
+            // This call runs inside the toggle's click (a user gesture), so it
+            // reliably starts playback if the earlier autoplay was blocked.
+            const st = ytPlayer.getPlayerState && ytPlayer.getPlayerState();
+            if (st !== 1) ytPlayer.playVideo();
+          }
+        } catch (err) {}
       }
       musicToggle.classList.toggle('muted', muted);
     }
